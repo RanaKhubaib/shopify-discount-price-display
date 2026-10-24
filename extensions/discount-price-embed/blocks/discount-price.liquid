@@ -1,0 +1,24 @@
+{% assign cfg = shop.metafields.discount_display.settings.value %}
+{% assign prices = shop.metafields.discount_display.prices.value %}
+
+{% if cfg.enabled %}
+  <style>
+    .dd-orig { opacity: 0.6; margin-right: 0.4em; }
+    .dd-sale { font-weight: 600; }
+  </style>
+  <script>
+    window.DiscountDisplay = {
+      settings: {{ cfg | json }},
+      prices: {{ prices | json }}
+    };
+  </script>
+  <script src="{{ 'discount-price.js' | asset_url }}" defer></script>
+{% endif %}
+
+{% schema %}
+{
+  "name": "Discount Price",
+  "target": "body",
+  "settings": []
+}
+{% endschema %}
