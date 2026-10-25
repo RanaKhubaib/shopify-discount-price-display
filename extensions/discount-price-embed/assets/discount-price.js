@@ -15,26 +15,52 @@
       currency: currency,
     });
   } catch (e) {
-    fmt = { format: function (n) { return n.toFixed(2); } };
+    fmt = {
+      format: function (n) {
+        return n.toFixed(2);
+      },
+    };
   }
-  function money(n) { return fmt.format(n * rate); }
+  function money(n) {
+    return fmt.format(n * rate);
+  }
 
   var color = /^#[0-9a-fA-F]{3,8}$/.test(S.saleColor) ? S.saleColor : "#d82c0d";
 
+  function needsApply(el, key) {
+    var wrap = el.querySelector(".dd-wrap");
+    if (!wrap || wrap.getAttribute("data-key") !== key) return true;
+    // Theme often re-injects the regular price as a sibling text node after our wrap.
+    var clone = el.cloneNode(true);
+    var w = clone.querySelector(".dd-wrap");
+    if (w) w.remove();
+    return !!(clone.textContent || "").replace(/\s+/g, "").length;
+  }
+
   function apply(el, o, s) {
     var key = o + "|" + s;
-    var existing = el.querySelector(".dd-wrap");
-    if (existing && existing.getAttribute("data-key") === key) return;
+    if (!needsApply(el, key)) return;
     el.innerHTML =
-      '<span class="dd-wrap" data-key="' + key + '">' +
-      '<s class="dd-orig">' + money(o) + "</s>" +
-      '<span class="dd-sale">' + money(s) + "</span></span>";
+      '<span class="dd-wrap" data-key="' +
+      key +
+      '">' +
+      '<s class="dd-orig">' +
+      money(o) +
+      "</s>" +
+      '<span class="dd-sale">' +
+      money(s) +
+      "</span></span>";
     el.querySelector(".dd-sale").style.color = color;
   }
 
   function handleFromUrl(url) {
     var m = (url || "").match(/\/products\/([^\/?#]+)/);
     return m ? decodeURIComponent(m[1]) : null;
+  }
+
+  function priceFor(entry, vid) {
+    if (vid && entry.variants && entry.variants[vid]) return entry.variants[vid];
+    return { o: entry.o, s: entry.s };
   }
 
   function run() {
@@ -49,12 +75,9 @@
         var idInput = form.querySelector('[name="id"]');
         var vid = idInput ? idInput.value : null;
         var entry = P[pageHandle];
-        var v = (vid && entry.variants[vid]) || null;
+        var prices = priceFor(entry, vid);
         var el = mainSection.querySelector(S.productSelector || ".price");
-        if (el) {
-          if (v) apply(el, v.o, v.s);
-          else if (!vid) apply(el, entry.o, entry.s);
-        }
+        if (el && prices && prices.s < prices.o) apply(el, prices.o, prices.s);
       }
     }
 
@@ -62,7 +85,9 @@
     if (S.showOnCards) {
       document.querySelectorAll(S.cardSelector || ".price").forEach(function (el) {
         if (mainSection && mainSection.contains(el)) return;
-        var box = el.closest("li, article, .card-wrapper, .product-card, .grid__item, .product-item");
+        var box = el.closest(
+          "li, article, .card-wrapper, .product-card, .grid__item, .product-item",
+        );
         var a = box && box.querySelector('a[href*="/products/"]');
         if (!a) return;
         var h = handleFromUrl(a.getAttribute("href"));
@@ -71,11 +96,22 @@
     }
   }
 
-  var t;
-  function later(ms) { clearTimeout(t); t = setTimeout(run, ms); }
+  var timers = [];
+  function later() {
+    timers.forEach(clearTimeout);
+    timers = [];
+    // Theme JS often rewrites price after our first pass — retry a few times.
+    [50, 150, 350, 700].forEach(function (ms) {
+      timers.push(setTimeout(run, ms));
+    });
+  }
 
   run();
-  new MutationObserver(function () { later(150); })
-    .observe(document.body, { childList: true, subtree: true });
-  document.addEventListener("change", function () { later(100); });
+  new MutationObserver(function () {
+    later();
+  }).observe(document.body, { childList: true, subtree: true, characterData: true });
+
+  document.addEventListener("change", later, true);
+  document.addEventListener("click", later, true);
+  document.addEventListener("shopify:section:load", later);
 })();
