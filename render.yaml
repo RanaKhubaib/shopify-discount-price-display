@@ -14,7 +14,9 @@ services:
     runtime: node
     plan: free
     region: oregon
-    buildCommand: npm ci && node ./scripts/db.mjs generate && npm run build
+    # Generate Prisma + build at build time so start can bind the port quickly.
+    # A slow start (prisma generate) fails Render health checks → SIGTERM.
+    buildCommand: npm ci && npm run build:production
     startCommand: npm run start:production
     healthCheckPath: /health
     envVars:

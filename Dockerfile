@@ -10,7 +10,7 @@ COPY package.json package-lock.json* ./
 RUN npm ci && npm cache clean --force
 
 COPY . .
-RUN node ./scripts/db.mjs generate && npm run build
+RUN npm run build:production
 
 EXPOSE 3000
 
