@@ -18,10 +18,23 @@ query {
                 products(first: 100) { nodes { id } }
                 productVariants(first: 100) { nodes { id product { id } } }
               }
+              ... on DiscountCollections {
+                collections(first: 50) { nodes { id } }
+              }
             }
           }
         }
       }
+    }
+  }
+}`;
+
+const COLLECTION_PRODUCTS_QUERY = `#graphql
+query ($id: ID!, $cursor: String) {
+  collection(id: $id) {
+    products(first: 100, after: $cursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes { id }
     }
   }
 }`;
@@ -92,6 +105,26 @@ function applyValue(price, value) {
   return price;
 }
 
+async function productsInCollection(admin, collectionId, maxProducts = 500) {
+  const ids = [];
+  let cursor = null;
+  while (ids.length < maxProducts) {
+    const res = await admin.graphql(COLLECTION_PRODUCTS_QUERY, {
+      variables: { id: collectionId, cursor },
+    });
+    const json = await res.json();
+    const connection = json.data?.collection?.products;
+    if (!connection) break;
+    for (const p of connection.nodes) {
+      if (p?.id) ids.push(p.id);
+      if (ids.length >= maxProducts) break;
+    }
+    if (!connection.pageInfo.hasNextPage) break;
+    cursor = connection.pageInfo.endCursor;
+  }
+  return ids;
+}
+
 export async function syncDiscounts(admin) {
   // 1. Read active automatic discounts
   const dRes = await admin.graphql(DISCOUNTS_QUERY);
@@ -99,19 +132,45 @@ export async function syncDiscounts(admin) {
   const nodes = dJson.data.automaticDiscountNodes.nodes;
 
   const rules = [];
+  const collectionCache = new Map();
+
   for (const n of nodes) {
     const d = n.automaticDiscount;
     if (!d || d.status !== "ACTIVE" || !d.customerGets) continue;
-    const items = d.customerGets.items;
-    if (!items || !items.products) continue; // only specific products/variants
     const value = d.customerGets.value;
     if (!value || (value.percentage === undefined && !value.amount)) continue;
-    rules.push({
-      value,
-      productIds: items.products.nodes.map((p) => p.id),
-      variantIds: items.productVariants.nodes.map((v) => v.id),
-      variantProductIds: items.productVariants.nodes.map((v) => v.product.id),
-    });
+
+    const items = d.customerGets.items;
+    if (!items) continue;
+
+    const productIds = [];
+    const variantIds = [];
+    const variantProductIds = [];
+
+    // Specific products / variants
+    if (items.products) {
+      for (const p of items.products.nodes) productIds.push(p.id);
+      for (const v of items.productVariants.nodes) {
+        variantIds.push(v.id);
+        variantProductIds.push(v.product.id);
+      }
+    }
+
+    // Specific collections → expand to product IDs
+    if (items.collections) {
+      for (const c of items.collections.nodes) {
+        let ids = collectionCache.get(c.id);
+        if (!ids) {
+          ids = await productsInCollection(admin, c.id);
+          collectionCache.set(c.id, ids);
+        }
+        for (const id of ids) productIds.push(id);
+      }
+    }
+
+    if (productIds.length === 0 && variantIds.length === 0) continue;
+
+    rules.push({ value, productIds, variantIds, variantProductIds });
   }
 
   // 2. Collect all product ids
