@@ -7,7 +7,8 @@
   var currency =
     (window.Shopify && Shopify.currency && Shopify.currency.active) || "USD";
   var rate =
-    (window.Shopify && Shopify.currency && parseFloat(Shopify.currency.rate)) || 1;
+    (window.Shopify && Shopify.currency && parseFloat(Shopify.currency.rate)) ||
+    1;
   var fmt;
   try {
     fmt = new Intl.NumberFormat(document.documentElement.lang || undefined, {
@@ -26,6 +27,15 @@
   }
 
   var color = /^#[0-9a-fA-F]{3,8}$/.test(S.saleColor) ? S.saleColor : "#d82c0d";
+
+  function selectorList(selectors, legacySelector) {
+    var list = Array.isArray(selectors) ? selectors : [legacySelector];
+    return list
+      .filter(function (selector) {
+        return typeof selector === "string" && selector.trim();
+      })
+      .join(", ");
+  }
 
   function needsApply(el, key) {
     var wrap = el.querySelector(".dd-wrap");
@@ -59,7 +69,8 @@
   }
 
   function priceFor(entry, vid) {
-    if (vid && entry.variants && entry.variants[vid]) return entry.variants[vid];
+    if (vid && entry.variants && entry.variants[vid])
+      return entry.variants[vid];
     return { o: entry.o, s: entry.s };
   }
 
@@ -76,14 +87,26 @@
         var vid = idInput ? idInput.value : null;
         var entry = P[pageHandle];
         var prices = priceFor(entry, vid);
-        var el = mainSection.querySelector(S.productSelector || ".price");
-        if (el && prices && prices.s < prices.o) apply(el, prices.o, prices.s);
+        var productSelector = selectorList(
+          S.productSelectors,
+          S.productSelector || ".price",
+        );
+        if (productSelector && prices && prices.s < prices.o) {
+          mainSection.querySelectorAll(productSelector).forEach(function (el) {
+            apply(el, prices.o, prices.s);
+          });
+        }
       }
     }
 
     // Product cards
     if (S.showOnCards) {
-      document.querySelectorAll(S.cardSelector || ".price").forEach(function (el) {
+      var cardSelector = selectorList(
+        S.cardSelectors,
+        S.cardSelector || ".price",
+      );
+      if (!cardSelector) return;
+      document.querySelectorAll(cardSelector).forEach(function (el) {
         if (mainSection && mainSection.contains(el)) return;
         var box = el.closest(
           "li, article, .card-wrapper, .product-card, .grid__item, .product-item",
@@ -109,7 +132,11 @@
   run();
   new MutationObserver(function () {
     later();
-  }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  }).observe(document.body, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+  });
 
   document.addEventListener("change", later, true);
   document.addEventListener("click", later, true);

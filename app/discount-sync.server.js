@@ -1,12 +1,12 @@
 const NS = "discount_display";
 
 const DISCOUNTS_QUERY = `#graphql
-query {
-  automaticDiscountNodes(first: 50) {
+query ($after: String) {
+  discountNodes(first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
     nodes {
-      automaticDiscount {
+      discount {
         ... on DiscountAutomaticBasic {
-          title
           status
           customerGets {
             value {
@@ -19,7 +19,25 @@ query {
                 productVariants(first: 100) { nodes { id product { id } } }
               }
               ... on DiscountCollections {
-                collections(first: 50) { nodes { id } }
+                collections(first: 100) { nodes { id } }
+              }
+            }
+          }
+        }
+        ... on DiscountCodeBasic {
+          status
+          customerGets {
+            value {
+              ... on DiscountPercentage { percentage }
+              ... on DiscountAmount { amount { amount } }
+            }
+            items {
+              ... on DiscountProducts {
+                products(first: 100) { nodes { id } }
+                productVariants(first: 100) { nodes { id product { id } } }
+              }
+              ... on DiscountCollections {
+                collections(first: 100) { nodes { id } }
               }
             }
           }
@@ -70,33 +88,76 @@ export const DEFAULT_SETTINGS = {
   showOnCards: true,
   showOnProductPage: true,
   saleColor: "#d82c0d",
-  cardSelector: ".price",
-  productSelector: ".price",
+  cardSelectors: [".price"],
+  productSelectors: [".price"],
 };
 
 const numId = (gid) => gid.split("/").pop();
 
+async function readGraphQL(admin, query, variables) {
+  const response = variables
+    ? await admin.graphql(query, { variables })
+    : await admin.graphql(query);
+  const json = await response.json();
+
+  if (json.errors?.length) {
+    throw new Error(json.errors.map((error) => error.message).join("; "));
+  }
+  if (!json.data)
+    throw new Error("Shopify returned no data for a GraphQL request.");
+  return json.data;
+}
+
+function getSelectors(settings, pluralKey, legacyKey, fallback) {
+  const saved = settings[pluralKey];
+  const values = Array.isArray(saved) ? saved : [settings[legacyKey]];
+  const selectors = values
+    .filter((selector) => typeof selector === "string")
+    .map((selector) => selector.trim())
+    .filter(Boolean);
+  return selectors.length ? selectors : fallback;
+}
+
 export async function loadSettings(admin) {
-  const res = await admin.graphql(SHOP_QUERY);
-  const json = await res.json();
-  const raw = json.data.shop.metafield?.value;
-  return { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) };
+  const data = await readGraphQL(admin, SHOP_QUERY);
+  const raw = data.shop.metafield?.value;
+  const saved = raw ? JSON.parse(raw) : {};
+  return {
+    ...DEFAULT_SETTINGS,
+    ...saved,
+    cardSelectors: getSelectors(
+      saved,
+      "cardSelectors",
+      "cardSelector",
+      DEFAULT_SETTINGS.cardSelectors,
+    ),
+    productSelectors: getSelectors(
+      saved,
+      "productSelectors",
+      "productSelector",
+      DEFAULT_SETTINGS.productSelectors,
+    ),
+  };
 }
 
 export async function saveSettings(admin, settings) {
-  const res = await admin.graphql(SHOP_QUERY);
-  const shopId = (await res.json()).data.shop.id;
-  await admin.graphql(SET_MUTATION, {
-    variables: {
-      m: [{
-        ownerId: shopId,
+  const data = await readGraphQL(admin, SHOP_QUERY);
+  const result = await readGraphQL(admin, SET_MUTATION, {
+    m: [
+      {
+        ownerId: data.shop.id,
         namespace: NS,
         key: "settings",
         type: "json",
         value: JSON.stringify(settings),
-      }],
-    },
+      },
+    ],
   });
+  const errors = result.metafieldsSet?.userErrors || [];
+  if (errors.length)
+    throw new Error(errors.map((error) => error.message).join(", "));
+  if (!result.metafieldsSet)
+    throw new Error("Shopify did not save the discount settings.");
 }
 
 function applyValue(price, value) {
@@ -109,68 +170,93 @@ async function productsInCollection(admin, collectionId, maxProducts = 500) {
   const ids = [];
   let cursor = null;
   while (ids.length < maxProducts) {
-    const res = await admin.graphql(COLLECTION_PRODUCTS_QUERY, {
-      variables: { id: collectionId, cursor },
+    const data = await readGraphQL(admin, COLLECTION_PRODUCTS_QUERY, {
+      id: collectionId,
+      cursor,
     });
-    const json = await res.json();
-    const connection = json.data?.collection?.products;
-    if (!connection) break;
+    const connection = data.collection?.products;
+    if (!connection) {
+      throw new Error(
+        `Shopify could not load products for collection ${collectionId}.`,
+      );
+    }
     for (const p of connection.nodes) {
       if (p?.id) ids.push(p.id);
       if (ids.length >= maxProducts) break;
     }
     if (!connection.pageInfo.hasNextPage) break;
     cursor = connection.pageInfo.endCursor;
+    if (!cursor)
+      throw new Error(
+        `Shopify returned no product cursor for collection ${collectionId}.`,
+      );
   }
   return ids;
 }
 
 export async function syncDiscounts(admin) {
-  // 1. Read active automatic discounts
-  const dRes = await admin.graphql(DISCOUNTS_QUERY);
-  const dJson = await dRes.json();
-  const nodes = dJson.data.automaticDiscountNodes.nodes;
-
+  // 1. Read active basic automatic and code discounts.
   const rules = [];
   const collectionCache = new Map();
+  let discountCursor = null;
+  let hasMoreDiscounts = true;
 
-  for (const n of nodes) {
-    const d = n.automaticDiscount;
-    if (!d || d.status !== "ACTIVE" || !d.customerGets) continue;
-    const value = d.customerGets.value;
-    if (!value || (value.percentage === undefined && !value.amount)) continue;
+  while (hasMoreDiscounts) {
+    const data = await readGraphQL(admin, DISCOUNTS_QUERY, {
+      after: discountCursor,
+    });
+    const connection = data.discountNodes;
+    if (!connection) throw new Error("Shopify did not return discount data.");
 
-    const items = d.customerGets.items;
-    if (!items) continue;
+    for (const node of connection.nodes) {
+      const discount = node.discount;
+      if (!discount || discount.status !== "ACTIVE" || !discount.customerGets)
+        continue;
+      const value = discount.customerGets.value;
+      if (!value || (value.percentage === undefined && !value.amount)) continue;
 
-    const productIds = [];
-    const variantIds = [];
-    const variantProductIds = [];
+      const items = discount.customerGets.items;
+      if (!items) continue;
 
-    // Specific products / variants
-    if (items.products) {
-      for (const p of items.products.nodes) productIds.push(p.id);
-      for (const v of items.productVariants.nodes) {
-        variantIds.push(v.id);
-        variantProductIds.push(v.product.id);
-      }
-    }
+      const productIds = [];
+      const variantIds = [];
+      const variantProductIds = [];
 
-    // Specific collections → expand to product IDs
-    if (items.collections) {
-      for (const c of items.collections.nodes) {
-        let ids = collectionCache.get(c.id);
-        if (!ids) {
-          ids = await productsInCollection(admin, c.id);
-          collectionCache.set(c.id, ids);
+      if (items.products) {
+        for (const product of items.products.nodes || []) {
+          if (product?.id) productIds.push(product.id);
         }
-        for (const id of ids) productIds.push(id);
+        for (const variant of items.productVariants.nodes || []) {
+          if (!variant?.id) continue;
+          variantIds.push(variant.id);
+          if (variant.product?.id) variantProductIds.push(variant.product.id);
+        }
+      }
+
+      if (items.collections) {
+        for (const collection of items.collections.nodes || []) {
+          if (!collection?.id) continue;
+          let ids = collectionCache.get(collection.id);
+          if (!ids) {
+            ids = await productsInCollection(admin, collection.id);
+            collectionCache.set(collection.id, ids);
+          }
+          productIds.push(...ids);
+        }
+      }
+
+      if (productIds.length || variantIds.length) {
+        rules.push({ value, productIds, variantIds, variantProductIds });
       }
     }
 
-    if (productIds.length === 0 && variantIds.length === 0) continue;
-
-    rules.push({ value, productIds, variantIds, variantProductIds });
+    hasMoreDiscounts = connection.pageInfo.hasNextPage;
+    if (hasMoreDiscounts) {
+      discountCursor = connection.pageInfo.endCursor;
+      if (!discountCursor) {
+        throw new Error("Shopify returned no cursor for additional discounts.");
+      }
+    }
   }
 
   // 2. Collect all product ids
@@ -184,11 +270,10 @@ export async function syncDiscounts(admin) {
   // 3. Load product prices (50 at a time)
   const products = [];
   for (let i = 0; i < ids.length; i += 50) {
-    const res = await admin.graphql(PRODUCTS_QUERY, {
-      variables: { ids: ids.slice(i, i + 50) },
+    const data = await readGraphQL(admin, PRODUCTS_QUERY, {
+      ids: ids.slice(i, i + 50),
     });
-    const json = await res.json();
-    json.data.nodes.forEach((p) => p && products.push(p));
+    data.nodes.forEach((product) => product && products.push(product));
   }
 
   // 4. Calculate sale prices (best discount wins)
@@ -219,21 +304,22 @@ export async function syncDiscounts(admin) {
   }
 
   // 5. Save to a shop metafield
-  const sRes = await admin.graphql(SHOP_QUERY);
-  const shopId = (await sRes.json()).data.shop.id;
-  const setRes = await admin.graphql(SET_MUTATION, {
-    variables: {
-      m: [{
-        ownerId: shopId,
+  const shopData = await readGraphQL(admin, SHOP_QUERY);
+  const saveResult = await readGraphQL(admin, SET_MUTATION, {
+    m: [
+      {
+        ownerId: shopData.shop.id,
         namespace: NS,
         key: "prices",
         type: "json",
         value: JSON.stringify(out),
-      }],
-    },
+      },
+    ],
   });
-  const errors = (await setRes.json()).data.metafieldsSet.userErrors;
+  const errors = saveResult.metafieldsSet?.userErrors || [];
   if (errors.length) throw new Error(errors.map((e) => e.message).join(", "));
+  if (!saveResult.metafieldsSet)
+    throw new Error("Shopify did not save the synced prices.");
 
   return { count: Object.keys(out).length };
 }
