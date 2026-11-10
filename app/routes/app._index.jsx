@@ -3,5 +3,6 @@ import { authenticate } from "../shopify.server";
 
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
-  return redirect("/app/settings");
+  const { search } = new URL(request.url);
+  return redirect(`/app/settings${search}`);
 };
