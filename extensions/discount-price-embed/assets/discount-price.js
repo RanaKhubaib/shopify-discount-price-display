@@ -4,11 +4,9 @@
   var S = D.settings;
   var P = D.prices || {};
 
-  var currency =
-    (window.Shopify && Shopify.currency && Shopify.currency.active) || "USD";
-  var rate =
-    (window.Shopify && Shopify.currency && parseFloat(Shopify.currency.rate)) ||
-    1;
+  var shopify = window.Shopify || {};
+  var currency = (shopify.currency && shopify.currency.active) || "USD";
+  var rate = (shopify.currency && parseFloat(shopify.currency.rate)) || 1;
   var fmt;
   try {
     fmt = new Intl.NumberFormat(document.documentElement.lang || undefined, {
@@ -48,6 +46,11 @@
   }
 
   function apply(el, o, s) {
+    if (s >= o) {
+      if (el.querySelector(".dd-wrap")) el.textContent = money(o);
+      return;
+    }
+
     var key = o + "|" + s;
     if (!needsApply(el, key)) return;
     el.innerHTML =
@@ -64,37 +67,84 @@
   }
 
   function handleFromUrl(url) {
-    var m = (url || "").match(/\/products\/([^\/?#]+)/);
+    var m = (url || "").match(/\/products\/([^/?#]+)/);
     return m ? decodeURIComponent(m[1]) : null;
   }
 
+  function variantIdFromUrl(url) {
+    try {
+      return new URL(url, location.origin).searchParams.get("variant");
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function normalizedVariantId(id) {
+    return id ? String(id).split("/").pop() : null;
+  }
+
   function priceFor(entry, vid) {
-    if (vid && entry.variants && entry.variants[vid])
-      return entry.variants[vid];
-    return { o: entry.o, s: entry.s };
+    var id = normalizedVariantId(vid);
+    return id && entry.variants ? entry.variants[id] || null : null;
+  }
+
+  function cardLinkFor(el) {
+    var box = el.closest(
+      "li, article, .card-wrapper, .product-card, .grid__item, .product-item",
+    );
+    return box && box.querySelector('a[href*="/products/"]');
+  }
+
+  function productFormFor(entry) {
+    var forms = document.querySelectorAll('form[action*="/cart/add"]');
+    var candidates = [];
+    forms.forEach(function (form) {
+      if (
+        form.closest(
+          "li, article, .card-wrapper, .product-card, .grid__item, .product-item",
+        )
+      ) {
+        return;
+      }
+      var scope = form.closest("section") || form.closest(".product");
+      if (!scope) return;
+      var idInput = form.querySelector('[name="id"]');
+      candidates.push({
+        form: form,
+        scope: scope,
+        variantId: idInput ? idInput.value : null,
+      });
+    });
+    return (
+      candidates.find(function (candidate) {
+        return priceFor(entry, candidate.variantId);
+      }) ||
+      candidates[0] ||
+      null
+    );
   }
 
   function run() {
-    var mainSection = null;
-
     // Main product page
-    var form = document.querySelector('form[action*="/cart/add"]');
     var pageHandle = handleFromUrl(location.pathname);
-    if (form && pageHandle) {
-      mainSection = form.closest("section") || form.closest("main");
-      if (S.showOnProductPage && P[pageHandle] && mainSection) {
+    if (pageHandle && P[pageHandle]) {
+      var entry = P[pageHandle];
+      var productForm = productFormFor(entry);
+      if (S.showOnProductPage && productForm) {
+        var form = productForm.form;
         var idInput = form.querySelector('[name="id"]');
-        var vid = idInput ? idInput.value : null;
-        var entry = P[pageHandle];
+        var vid = (idInput && idInput.value) || variantIdFromUrl(location.href);
         var prices = priceFor(entry, vid);
         var productSelector = selectorList(
           S.productSelectors,
           S.productSelector || ".price",
         );
-        if (productSelector && prices && prices.s < prices.o) {
-          mainSection.querySelectorAll(productSelector).forEach(function (el) {
-            apply(el, prices.o, prices.s);
-          });
+        if (productSelector && prices) {
+          productForm.scope
+            .querySelectorAll(productSelector)
+            .forEach(function (el) {
+              if (!cardLinkFor(el)) apply(el, prices.o, prices.s);
+            });
         }
       }
     }
@@ -107,14 +157,16 @@
       );
       if (!cardSelector) return;
       document.querySelectorAll(cardSelector).forEach(function (el) {
-        if (mainSection && mainSection.contains(el)) return;
-        var box = el.closest(
-          "li, article, .card-wrapper, .product-card, .grid__item, .product-item",
-        );
-        var a = box && box.querySelector('a[href*="/products/"]');
+        var a = cardLinkFor(el);
         if (!a) return;
         var h = handleFromUrl(a.getAttribute("href"));
-        if (h && P[h]) apply(el, P[h].o, P[h].s);
+        if (!h || !P[h]) return;
+
+        var variantId = variantIdFromUrl(a.href);
+        var cardPrices = variantId
+          ? priceFor(P[h], variantId)
+          : P[h].card || null;
+        if (cardPrices) apply(el, cardPrices.o, cardPrices.s);
       });
     }
   }

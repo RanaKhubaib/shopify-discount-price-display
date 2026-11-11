@@ -280,6 +280,7 @@ export async function syncDiscounts(admin) {
   const out = {};
   for (const p of products) {
     const variants = {};
+    let discountedVariantCount = 0;
     for (const v of p.variants.nodes) {
       const orig = parseFloat(v.price);
       let best = null;
@@ -290,17 +291,20 @@ export async function syncDiscounts(admin) {
         const sale = applyValue(orig, r.value);
         if (best === null || sale < best) best = sale;
       }
-      if (best !== null && best < orig) {
-        variants[numId(v.id)] = {
-          o: orig,
-          s: Math.round(best * 100) / 100,
-        };
-      }
+      const sale =
+        best !== null && best < orig ? Math.round(best * 100) / 100 : orig;
+      if (sale < orig) discountedVariantCount++;
+      variants[numId(v.id)] = { o: orig, s: sale };
     }
     const list = Object.values(variants);
-    if (list.length === 0) continue;
-    const lowest = list.reduce((a, b) => (b.s < a.s ? b : a));
-    out[p.handle] = { variants, o: lowest.o, s: lowest.s };
+    if (discountedVariantCount === 0) continue;
+    const discounted = list.filter((variant) => variant.s < variant.o);
+    const lowest = discounted.reduce((a, b) => (b.s < a.s ? b : a));
+    const entry = { variants, o: lowest.o, s: lowest.s };
+    if (discountedVariantCount === list.length) {
+      entry.card = { o: lowest.o, s: lowest.s };
+    }
+    out[p.handle] = entry;
   }
 
   // 5. Save to a shop metafield

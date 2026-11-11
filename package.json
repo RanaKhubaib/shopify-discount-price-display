@@ -20,6 +20,7 @@
     "prisma": "prisma",
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
+    "test:discount-sync": "node --test app/discount-sync.server.test.js",
     "typecheck": "react-router typegen && tsc --noEmit"
   },
   "type": "module",

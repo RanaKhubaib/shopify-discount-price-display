@@ -241,7 +241,10 @@ export default function Settings() {
                       fontSize: 14,
                     }}
                   >
-                    Show sale prices on collection and home page cards.
+                    Show sale prices on collection and home page cards. For
+                    variant-specific discounts, the product link must include
+                    its variant ID; otherwise the card price is left unchanged
+                    to avoid displaying a mismatched price.
                   </span>
                 </span>
               </div>
